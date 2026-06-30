@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+**/build/
+
+# Local configuration
+local.properties
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Keystore
+*.jks
+*.keystore
+
+# Keep Gradle wrapper JAR if present
+!gradle/wrapper/gradle-wrapper.jar
