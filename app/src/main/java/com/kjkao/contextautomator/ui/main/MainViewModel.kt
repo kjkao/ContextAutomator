@@ -5,6 +5,7 @@ import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.kjkao.contextautomator.alarm.TimeRuleAlarmScheduler
+import com.kjkao.contextautomator.automation.RuleCooldownBypassStore
 import com.kjkao.contextautomator.data.local.RuleEntity
 import com.kjkao.contextautomator.data.repo.RuleRepository
 import com.kjkao.contextautomator.domain.model.ActionType
@@ -14,7 +15,8 @@ import kotlinx.coroutines.launch
 
 class MainViewModel(
     private val repository: RuleRepository,
-    private val timeRuleAlarmScheduler: TimeRuleAlarmScheduler
+    private val timeRuleAlarmScheduler: TimeRuleAlarmScheduler,
+    private val ruleCooldownBypassStore: RuleCooldownBypassStore
 ) : ViewModel() {
 
     private val _uiState = MutableLiveData(MainUiState())
@@ -165,6 +167,9 @@ class MainViewModel(
                 timeRuleAlarmScheduler.cancelRule(rule.id)
             } else {
                 repository.updateRule(updatedRule)
+                if (!rule.enabled && enabled) {
+                    ruleCooldownBypassStore.requestRuleBypass(rule.id)
+                }
             }
             syncTimeRuleAlarms()
             _uiState.value = _uiState.value?.copy(status = "Rule updated")
@@ -180,6 +185,9 @@ class MainViewModel(
                     updatedAt = System.currentTimeMillis()
                 )
             )
+            if (enabled && !rule.enabled) {
+                ruleCooldownBypassStore.requestRuleBypass(rule.id)
+            }
             if (!enabled) {
                 timeRuleAlarmScheduler.cancelRule(rule.id)
             }

@@ -6,6 +6,7 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.kjkao.contextautomator.alarm.TimeRuleAlarmScheduler
 import com.kjkao.contextautomator.automation.AutomationStateStore
+import com.kjkao.contextautomator.automation.RuleCooldownBypassStore
 import com.kjkao.contextautomator.data.local.AppDatabase
 import com.kjkao.contextautomator.data.repo.RuleRepository
 import kotlinx.coroutines.CoroutineScope
@@ -21,6 +22,9 @@ class ContextAutomatorApp : Application() {
         private set
 
     lateinit var automationStateStore: AutomationStateStore
+        private set
+
+    lateinit var ruleCooldownBypassStore: RuleCooldownBypassStore
         private set
 
     override fun onCreate() {
@@ -40,6 +44,7 @@ class ContextAutomatorApp : Application() {
         )
         timeRuleAlarmScheduler = TimeRuleAlarmScheduler(applicationContext)
         automationStateStore = AutomationStateStore(applicationContext)
+        ruleCooldownBypassStore = RuleCooldownBypassStore(applicationContext)
 
         CoroutineScope(Dispatchers.IO).launch {
             val allRules = repository.getAllRules()

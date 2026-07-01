@@ -24,6 +24,7 @@ import androidx.core.app.NotificationCompat
 import com.kjkao.contextautomator.R
 import com.kjkao.contextautomator.ContextAutomatorApp
 import com.kjkao.contextautomator.MainActivity
+import com.kjkao.contextautomator.automation.RuleCooldownBypassStore
 import com.kjkao.contextautomator.audio.RingerController
 import com.kjkao.contextautomator.data.local.RuleEntity
 import com.kjkao.contextautomator.domain.model.ActionType
@@ -54,11 +55,13 @@ class AutomationService : Service() {
     private lateinit var locationManager: LocationManager
     private lateinit var ringerController: RingerController
     private lateinit var repository: com.kjkao.contextautomator.data.repo.RuleRepository
+    private lateinit var ruleCooldownBypassStore: RuleCooldownBypassStore
     private lateinit var wifiReceiver: ScanResultReceiver
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var dndNotificationShown = false
     private val evaluationMutex = Mutex()
     private var lastBluetoothDiscoveryAt = 0L
+    private var bypassAllCooldownsPending = false
     private val connectedBluetoothNames = mutableSetOf<String>()
     private val detectedBluetoothNames = mutableSetOf<String>()
     private val bluetoothReceiver = object : BroadcastReceiver() {
@@ -83,7 +86,10 @@ class AutomationService : Service() {
         locationManager = applicationContext.getSystemService(LOCATION_SERVICE) as LocationManager
         bluetoothAdapter = (getSystemService(BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager)?.adapter
         ringerController = RingerController(this)
-        repository = (application as ContextAutomatorApp).repository
+        val app = application as ContextAutomatorApp
+        repository = app.repository
+        ruleCooldownBypassStore = app.ruleCooldownBypassStore
+        bypassAllCooldownsPending = ruleCooldownBypassStore.consumeBypassAllOnNextServiceStart()
         wifiReceiver = ScanResultReceiver { evaluateRules() }
 
         registerReceiver(
@@ -150,6 +156,8 @@ class AutomationService : Service() {
     private fun evaluateRules(rulesOverride: List<RuleEntity>? = null) {
         serviceScope.launch {
             evaluationMutex.withLock {
+                val bypassAllCooldowns = bypassAllCooldownsPending
+                bypassAllCooldownsPending = false
                 val rules = rulesOverride ?: repository.getEnabledRules()
                 if (rules.isEmpty()) return@withLock
 
@@ -203,7 +211,7 @@ class AutomationService : Service() {
                 if (matchedRules.isEmpty()) return@withLock
 
                 matchedRules.forEach { matchedRule ->
-                    handleMatchedRule(repository, matchedRule)
+                    handleMatchedRule(repository, matchedRule, bypassAllCooldowns)
                 }
             }
         }
@@ -238,16 +246,18 @@ class AutomationService : Service() {
 
     private suspend fun handleMatchedRule(
         repository: com.kjkao.contextautomator.data.repo.RuleRepository,
-        rule: RuleEntity
+        rule: RuleEntity,
+        bypassAllCooldowns: Boolean
     ) {
         val now = System.currentTimeMillis()
+        val bypassCooldown = bypassAllCooldowns || ruleCooldownBypassStore.consumeRuleBypass(rule.id)
         val latestExecution = repository.getLatestRuleExecution(rule.id)
         val isRecentDuplicate = latestExecution != null &&
             latestExecution.executedAt >= now - RULE_EXECUTION_COOLDOWN_MS &&
             latestExecution.actionType == rule.actionType &&
             latestExecution.actionValue == rule.actionValue
 
-        if (isRecentDuplicate) return
+        if (isRecentDuplicate && !bypassCooldown) return
         if (ringerController.isActionAlreadyApplied(rule.actionType, rule.actionValue)) return
 
         val applied = applyAction(rule)

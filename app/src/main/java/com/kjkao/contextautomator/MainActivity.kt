@@ -42,7 +42,8 @@ class MainActivity : AppCompatActivity() {
     private val viewModel: MainViewModel by viewModels {
         MainViewModelFactory(
             (application as ContextAutomatorApp).repository,
-            (application as ContextAutomatorApp).timeRuleAlarmScheduler
+            (application as ContextAutomatorApp).timeRuleAlarmScheduler,
+            (application as ContextAutomatorApp).ruleCooldownBypassStore
         )
     }
 
@@ -139,8 +140,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startScanService() {
-        startForegroundService(Intent(this, AutomationService::class.java))
         val app = application as ContextAutomatorApp
+        app.ruleCooldownBypassStore.requestBypassAllOnNextServiceStart()
+        startForegroundService(Intent(this, AutomationService::class.java))
         app.automationStateStore.setAutomationEnabled(true)
         lifecycleScope.launch {
             app.timeRuleAlarmScheduler.syncAllRules(app.repository.getAllRules())

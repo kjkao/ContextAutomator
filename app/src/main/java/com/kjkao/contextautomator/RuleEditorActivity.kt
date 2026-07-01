@@ -49,7 +49,8 @@ class RuleEditorActivity : AppCompatActivity() {
     private val viewModel: MainViewModel by viewModels {
         MainViewModelFactory(
             (application as ContextAutomatorApp).repository,
-            (application as ContextAutomatorApp).timeRuleAlarmScheduler
+            (application as ContextAutomatorApp).timeRuleAlarmScheduler,
+            (application as ContextAutomatorApp).ruleCooldownBypassStore
         )
     }
 
