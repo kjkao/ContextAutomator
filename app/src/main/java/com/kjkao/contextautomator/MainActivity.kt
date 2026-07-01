@@ -75,7 +75,9 @@ class MainActivity : AppCompatActivity() {
             startActivity(RuleEditorActivity.createIntent(this))
         }
         binding.viewHistoryButton.setOnClickListener {
-            showRuleHistoryDialog(viewModel.uiState.value?.executionHistory.orEmpty())
+            lifecycleScope.launch {
+                showRuleHistoryDialog(viewModel.refreshExecutionHistory())
+            }
         }
         binding.emptyStateAddRuleButton.setOnClickListener {
             startActivity(RuleEditorActivity.createIntent(this))

@@ -24,9 +24,15 @@ class MainViewModel(
         viewModelScope.launch {
             val count = repository.getEnabledRulesCount()
             val rules = repository.getAllRules()
-            val history = repository.getRuleExecutionHistorySince(System.currentTimeMillis() - HISTORY_WINDOW_MS)
+            val history = loadExecutionHistory()
             _uiState.value = _uiState.value?.copy(ruleCount = count, rules = rules, executionHistory = history)
         }
+    }
+
+    suspend fun refreshExecutionHistory(): List<com.kjkao.contextautomator.data.local.RuleExecutionHistoryEntity> {
+        val history = loadExecutionHistory()
+        _uiState.postValue(_uiState.value?.copy(executionHistory = history))
+        return history
     }
 
     fun addRule(
@@ -229,5 +235,8 @@ class MainViewModel(
     companion object {
         private const val HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000L
     }
+
+    private suspend fun loadExecutionHistory() =
+        repository.getRuleExecutionHistorySince(System.currentTimeMillis() - HISTORY_WINDOW_MS)
 }
 
