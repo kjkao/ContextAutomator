@@ -379,10 +379,20 @@
                 android:textAppearance="@style/TextAppearance.Material3.TitleMedium" />
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/saveRuleButton"
+                android:id="@+id/runRuleNowButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
+                android:minHeight="52dp"
+                android:text="@string/rule_editor_run_rule_now"
+                android:visibility="gone" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/saveRuleButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
                 android:minHeight="52dp"
                 android:text="@string/save" />
 

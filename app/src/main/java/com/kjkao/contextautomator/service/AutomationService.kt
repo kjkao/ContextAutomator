@@ -15,10 +15,12 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
 import com.kjkao.contextautomator.R
@@ -59,6 +61,7 @@ class AutomationService : Service() {
     private lateinit var wifiReceiver: ScanResultReceiver
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var dndNotificationShown = false
+    private var writeSettingsNotificationShown = false
     private val evaluationMutex = Mutex()
     private var lastBluetoothDiscoveryAt = 0L
     private var bypassAllCooldownsPending = false
@@ -409,7 +412,7 @@ class AutomationService : Service() {
                 if (!applied) {
                     showDndAccessHintNotification()
                 } else if (dndNotificationShown) {
-                    restoreDefaultNotification()
+                    clearDndAccessHintNotification()
                 }
                 applied
             }
@@ -417,12 +420,28 @@ class AutomationService : Service() {
                 ringerController.applyRingVolumePercent(rule.actionValue)
                 true
             }
-            ActionType.SCREEN_BRIGHTNESS.name -> ringerController.applyScreenBrightness(rule.actionValue)
+            ActionType.SCREEN_BRIGHTNESS.name -> {
+                val applied = ringerController.applyScreenBrightness(rule.actionValue)
+                if (!applied && !Settings.System.canWrite(this)) {
+                    showWriteSettingsHintNotification()
+                } else if (applied && writeSettingsNotificationShown) {
+                    clearWriteSettingsHintNotification()
+                }
+                applied
+            }
             ActionType.MEDIA_VOLUME.name -> {
                 ringerController.applyMediaVolumePercent(rule.actionValue)
                 true
             }
-            ActionType.SCREEN_TIMEOUT.name -> ringerController.applyScreenTimeout(rule.actionValue)
+            ActionType.SCREEN_TIMEOUT.name -> {
+                val applied = ringerController.applyScreenTimeout(rule.actionValue)
+                if (!applied && !Settings.System.canWrite(this)) {
+                    showWriteSettingsHintNotification()
+                } else if (applied && writeSettingsNotificationShown) {
+                    clearWriteSettingsHintNotification()
+                }
+                applied
+            }
             else -> false
         }
     }
@@ -445,6 +464,47 @@ class AutomationService : Service() {
         )
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun showWriteSettingsHintNotification() {
+        writeSettingsNotificationShown = true
+        val settingsIntent = Intent(
+            Settings.ACTION_MANAGE_WRITE_SETTINGS,
+            Uri.parse("package:$packageName")
+        ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            1002,
+            settingsIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = createNotification(
+            contentText = getString(R.string.notification_write_settings_needed),
+            pendingIntent = pendingIntent
+        )
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun clearDndAccessHintNotification() {
+        dndNotificationShown = false
+        if (writeSettingsNotificationShown) {
+            showWriteSettingsHintNotification()
+        } else {
+            restoreDefaultNotification()
+        }
+    }
+
+    private fun clearWriteSettingsHintNotification() {
+        writeSettingsNotificationShown = false
+        if (dndNotificationShown) {
+            showDndAccessHintNotification()
+        } else {
+            restoreDefaultNotification()
+        }
     }
 
     private fun restoreDefaultNotification() {

@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.AppOpsManager
 import android.app.NotificationManager
+import android.app.usage.UsageStatsManager
 import android.app.TimePickerDialog
 import android.bluetooth.BluetoothManager
 import android.content.Context
@@ -13,6 +14,7 @@ import android.location.LocationManager
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.BatteryManager
 import android.os.Bundle
 import android.provider.Settings
 import android.text.InputType
@@ -22,11 +24,14 @@ import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.Spinner
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
+import androidx.lifecycle.lifecycleScope
+import com.kjkao.contextautomator.audio.RingerController
 import com.kjkao.contextautomator.data.local.RuleEntity
 import com.kjkao.contextautomator.databinding.ActivityRuleEditorBinding
 import com.kjkao.contextautomator.domain.model.ActionType
@@ -35,15 +40,22 @@ import com.kjkao.contextautomator.domain.model.TriggerType
 import com.google.android.material.slider.Slider
 import com.kjkao.contextautomator.ui.main.MainViewModel
 import com.kjkao.contextautomator.ui.main.MainViewModelFactory
+import kotlinx.coroutines.launch
 import java.util.Locale
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 class RuleEditorActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityRuleEditorBinding
     private lateinit var wifiManager: WifiManager
-    private var lastStatus: String? = null
     private var awaitingSaveResult = false
     private var suppressValidation = false
+    private var lastSelectedTriggerType: TriggerType? = null
+    private var isRunningRuleNow = false
+    private var persistedRule: RuleEntity? = null
     private val editingRule by lazy { intent.toRuleEntityOrNull() }
 
     private val viewModel: MainViewModel by viewModels {
@@ -59,6 +71,7 @@ class RuleEditorActivity : AppCompatActivity() {
         binding = ActivityRuleEditorBinding.inflate(layoutInflater)
         setContentView(binding.root)
         wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+        persistedRule = editingRule
 
         title = if (editingRule == null) getString(R.string.add_rule) else getString(R.string.edit_rule_title)
         setupToolbar()
@@ -79,14 +92,30 @@ class RuleEditorActivity : AppCompatActivity() {
                 awaitingSaveResult = false
                 return@setOnClickListener
             }
+            val actionType = selectedActionType(binding.actionTypeSpinner.selectedItemPosition)
+            if (requiresWriteSettings(actionType) && !Settings.System.canWrite(this)) {
+                awaitingSaveResult = false
+                showWriteSettingsPermissionDialog()
+                return@setOnClickListener
+            }
             saveRule()
         }
         binding.cancelRuleButton.setOnClickListener {
-            finish()
+            attemptCloseEditor()
+        }
+        binding.runRuleNowButton.setOnClickListener {
+            executeCurrentRuleNow()
         }
         binding.editorOpenDndSettingsButton.setOnClickListener {
             openDndSettings()
         }
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                attemptCloseEditor()
+            }
+        })
+        updatePrimaryButtonsState()
     }
 
     override fun onResume() {
@@ -96,7 +125,7 @@ class RuleEditorActivity : AppCompatActivity() {
 
     private fun setupToolbar() {
         binding.ruleEditorToolbar.title = title
-        binding.ruleEditorToolbar.setNavigationOnClickListener { finish() }
+        binding.ruleEditorToolbar.setNavigationOnClickListener { attemptCloseEditor() }
     }
 
     private fun setupEditorUi() {
@@ -128,6 +157,10 @@ class RuleEditorActivity : AppCompatActivity() {
 
         binding.triggerTypeSpinner.setOnItemSelectedListener { _, _, position, _ ->
             val triggerType = selectedTriggerType(position)
+            val previousTriggerType = lastSelectedTriggerType
+            if (!suppressValidation && previousTriggerType != null && previousTriggerType != triggerType) {
+                binding.triggerValueInput.text?.clear()
+            }
             binding.triggerConditionSpinner.adapter = ArrayAdapter(
                 this,
                 android.R.layout.simple_spinner_dropdown_item,
@@ -137,6 +170,7 @@ class RuleEditorActivity : AppCompatActivity() {
                 binding.triggerConditionSpinner.setSelection(0)
             }
             updateTriggerInputVisibility(triggerType)
+            lastSelectedTriggerType = triggerType
             refreshFormValidation(showErrors = false)
         }
 
@@ -183,6 +217,7 @@ class RuleEditorActivity : AppCompatActivity() {
         val rule = editingRule
         if (rule == null) {
             binding.statusCard.visibility = View.GONE
+            binding.runRuleNowButton.visibility = View.VISIBLE
             binding.triggerTypeSpinner.setSelection(0)
             binding.actionTypeSpinner.setSelection(0)
             updateActionInput(ActionType.RINGER_MODE, 2)
@@ -192,6 +227,7 @@ class RuleEditorActivity : AppCompatActivity() {
 
         suppressValidation = true
         binding.statusCard.visibility = View.VISIBLE
+        binding.runRuleNowButton.visibility = View.VISIBLE
         binding.enabledSwitch.isChecked = rule.enabled
         binding.triggerTypeSpinner.setSelection(triggerTypePosition(rule.triggerType))
         binding.triggerValueInput.setText(rule.triggerValue)
@@ -215,6 +251,9 @@ class RuleEditorActivity : AppCompatActivity() {
         binding.timeEndInput.doAfterTextChanged {
             refreshFormValidation(showErrors = false)
         }
+        binding.enabledSwitch.setOnCheckedChangeListener { _, _ ->
+            updatePrimaryButtonsState()
+        }
     }
 
     private fun applyExistingConditionSelection(triggerType: TriggerType): Boolean {
@@ -230,14 +269,16 @@ class RuleEditorActivity : AppCompatActivity() {
 
     private fun observeSaveStatus() {
         viewModel.uiState.observe(this) { state ->
-            if (state.status == lastStatus) return@observe
-            lastStatus = state.status
             if (!awaitingSaveResult) return@observe
 
             if (state.status == "Rule added" || state.status == "Rule updated") {
                 setResult(Activity.RESULT_OK)
                 Toast.makeText(this, state.status, Toast.LENGTH_SHORT).show()
-                finish()
+                awaitingSaveResult = false
+                lifecycleScope.launch {
+                    persistedRule = resolvePersistedRuleFromCurrentForm()
+                    refreshFormValidation(showErrors = false)
+                }
             } else {
                 awaitingSaveResult = false
                 Toast.makeText(this, state.status, Toast.LENGTH_SHORT).show()
@@ -541,8 +582,313 @@ class RuleEditorActivity : AppCompatActivity() {
         binding.timeEndLayout.error = null
         if (startError != null) isValid = false
 
-        binding.saveRuleButton.isEnabled = isValid
+        updatePrimaryButtonsState()
         return isValid
+    }
+
+    private fun updatePrimaryButtonsState() {
+        val hasPersistedRule = persistedRule != null
+        val hasUnsavedChanges = hasUnsavedChanges()
+        binding.saveRuleButton.isEnabled = !awaitingSaveResult && (!hasPersistedRule || hasUnsavedChanges)
+        binding.runRuleNowButton.isEnabled = hasPersistedRule && !hasUnsavedChanges && !isRunningRuleNow
+        binding.runRuleNowButton.alpha = if (binding.runRuleNowButton.isEnabled) 1f else 0.6f
+        binding.saveRuleButton.alpha = if (binding.saveRuleButton.isEnabled) 1f else 0.6f
+    }
+
+    private fun hasUnsavedChanges(): Boolean {
+        val originalRule = persistedRule ?: return isAddFormDirty()
+        if (suppressValidation) return false
+
+        val selectedTriggerType = selectedTriggerType(binding.triggerTypeSpinner.selectedItemPosition)
+        val selectedTriggerCondition = selectedTriggerCondition(binding.triggerConditionSpinner.selectedItemPosition)
+        val triggerValue = binding.triggerValueInput.text?.toString().orEmpty().trim()
+        val selectedActionType = selectedActionType(binding.actionTypeSpinner.selectedItemPosition)
+        val selectedActionValue = selectedActionValue()
+        val enabled = binding.enabledSwitch.isChecked
+
+        val selectedTimeMinute = if (selectedTriggerType == TriggerType.TIME_RANGE) {
+            parseMinuteOfDay(binding.timeStartInput.text?.toString().orEmpty().trim())
+        } else {
+            null
+        }
+        val originalTimeMinute = if (originalRule.triggerType == TriggerType.TIME_RANGE.name) {
+            originalRule.timeStartMinutes ?: originalRule.timeEndMinutes
+        } else {
+            null
+        }
+
+        return originalRule.triggerType != selectedTriggerType.name ||
+            originalRule.triggerCondition != selectedTriggerCondition.name ||
+            originalRule.triggerValue != triggerValue ||
+            originalTimeMinute != selectedTimeMinute ||
+            originalRule.actionType != selectedActionType.name ||
+            originalRule.actionValue != selectedActionValue ||
+            originalRule.enabled != enabled
+    }
+
+    private fun isAddFormDirty(): Boolean {
+        val triggerType = selectedTriggerType(binding.triggerTypeSpinner.selectedItemPosition)
+        val triggerCondition = selectedTriggerCondition(binding.triggerConditionSpinner.selectedItemPosition)
+        val actionType = selectedActionType(binding.actionTypeSpinner.selectedItemPosition)
+        val triggerValue = binding.triggerValueInput.text?.toString().orEmpty().trim()
+        val timeText = binding.timeStartInput.text?.toString().orEmpty().trim()
+        val actionValue = selectedActionValue()
+
+        return triggerType != TriggerType.WIFI_SSID ||
+            triggerCondition != TriggerCondition.DETECTED ||
+            actionType != ActionType.RINGER_MODE ||
+            actionValue != 2 ||
+            triggerValue.isNotBlank() ||
+            timeText.isNotBlank()
+    }
+
+    private fun executeCurrentRuleNow() {
+        val rule = persistedRule ?: return
+        if (hasUnsavedChanges()) {
+            updatePrimaryButtonsState()
+            return
+        }
+
+        isRunningRuleNow = true
+        updatePrimaryButtonsState()
+
+        val ringerController = RingerController(this)
+        val app = application as ContextAutomatorApp
+        lifecycleScope.launch {
+            if (!matchesConditionNow(rule)) {
+                Toast.makeText(
+                    this@RuleEditorActivity,
+                    getString(R.string.rule_editor_run_rule_condition_not_matched),
+                    Toast.LENGTH_SHORT
+                ).show()
+                isRunningRuleNow = false
+                updatePrimaryButtonsState()
+                return@launch
+            }
+
+            if (ringerController.isActionAlreadyApplied(rule.actionType, rule.actionValue)) {
+                Toast.makeText(
+                    this@RuleEditorActivity,
+                    getString(R.string.rule_editor_run_rule_action_already_applied),
+                    Toast.LENGTH_SHORT
+                ).show()
+                isRunningRuleNow = false
+                updatePrimaryButtonsState()
+                return@launch
+            }
+
+            val applied = runCatching {
+                when (rule.actionType) {
+                    ActionType.RINGER_MODE.name -> ringerController.applyRingerMode(rule.actionValue)
+                    ActionType.RING_VOLUME.name -> {
+                        ringerController.applyRingVolumePercent(rule.actionValue)
+                        true
+                    }
+                    ActionType.MEDIA_VOLUME.name -> {
+                        ringerController.applyMediaVolumePercent(rule.actionValue)
+                        true
+                    }
+                    ActionType.SCREEN_BRIGHTNESS.name -> ringerController.applyScreenBrightness(rule.actionValue)
+                    ActionType.SCREEN_TIMEOUT.name -> ringerController.applyScreenTimeout(rule.actionValue)
+                    else -> false
+                }
+            }.getOrDefault(false)
+
+            if (applied) {
+                app.repository.recordRuleExecution(rule, System.currentTimeMillis())
+                Toast.makeText(this@RuleEditorActivity, getString(R.string.rule_editor_run_rule_success), Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this@RuleEditorActivity, getString(R.string.rule_editor_run_rule_failed), Toast.LENGTH_SHORT).show()
+            }
+
+            isRunningRuleNow = false
+            updatePrimaryButtonsState()
+        }
+    }
+
+    private fun matchesConditionNow(rule: RuleEntity): Boolean {
+        return when (rule.triggerType) {
+            TriggerType.WIFI_SSID.name -> {
+                val target = rule.triggerValue.trim().lowercase()
+                val connectedWifiSsid = wifiManager.connectionInfo?.ssid
+                    ?.removePrefix("\"")
+                    ?.removeSuffix("\"")
+                    ?.trim()
+                    ?.lowercase()
+                    .orEmpty()
+                if (rule.triggerCondition == TriggerCondition.CONNECTED.name) {
+                    connectedWifiSsid == target
+                } else {
+                    if (!hasWifiPermissions()) return false
+                    val scannedSsids = wifiManager.scanResults
+                        .mapNotNull { it.SSID }
+                        .map { it.trim().lowercase() }
+                        .filter { it.isNotBlank() }
+                        .toSet()
+                    scannedSsids.contains(target)
+                }
+            }
+            TriggerType.TIME_RANGE.name -> {
+                val targetMinute = rule.timeStartMinutes ?: rule.timeEndMinutes ?: return false
+                val now = java.util.Calendar.getInstance()
+                val currentMinute = now.get(java.util.Calendar.HOUR_OF_DAY) * 60 + now.get(java.util.Calendar.MINUTE)
+                currentMinute == targetMinute
+            }
+            TriggerType.BLUETOOTH_DEVICE.name -> {
+                val target = rule.triggerValue.trim().lowercase()
+                val connectedNames = getConnectedBluetoothNamesNow()
+                if (rule.triggerCondition == TriggerCondition.CONNECTED.name) {
+                    connectedNames.contains(target)
+                } else {
+                    val manager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
+                    val bondedNames = manager.adapter?.bondedDevices
+                        ?.mapNotNull { it.name?.trim()?.lowercase() }
+                        ?.filter { it.isNotBlank() }
+                        ?.toSet()
+                        .orEmpty()
+                    connectedNames.contains(target) || bondedNames.contains(target)
+                }
+            }
+            TriggerType.CHARGING_STATE.name -> {
+                val isCharging = isDeviceChargingNow()
+                if (rule.triggerCondition == TriggerCondition.CONNECTED.name) {
+                    !isCharging
+                } else {
+                    isCharging
+                }
+            }
+            TriggerType.GEOFENCE.name -> {
+                if (!hasLocationPermission()) return false
+                val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+                val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+                val location = providers.mapNotNull { provider ->
+                    runCatching { locationManager.getLastKnownLocation(provider) }.getOrNull()
+                }.maxByOrNull { it.time } ?: return false
+                val geofence = parseGeofence(rule.triggerValue) ?: return false
+                val inside = distanceMeters(location.latitude, location.longitude, geofence.first, geofence.second) <= geofence.third
+                if (rule.triggerCondition == TriggerCondition.CONNECTED.name) {
+                    !inside
+                } else {
+                    inside
+                }
+            }
+            TriggerType.APP_FOREGROUND.name -> {
+                if (!hasUsageAccessPermission()) return false
+                val usageStatsManager = getSystemService(USAGE_STATS_SERVICE) as UsageStatsManager
+                val end = System.currentTimeMillis()
+                val begin = end - 5 * 60 * 1000L
+                val stats = usageStatsManager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, begin, end)
+                val foregroundPackage = stats
+                    .maxByOrNull { it.lastTimeUsed }
+                    ?.packageName
+                    ?.lowercase()
+                    .orEmpty()
+                val isForeground = foregroundPackage == rule.triggerValue.trim().lowercase()
+                if (rule.triggerCondition == TriggerCondition.CONNECTED.name) {
+                    !isForeground
+                } else {
+                    isForeground
+                }
+            }
+            else -> false
+        }
+    }
+
+    private fun getConnectedBluetoothNamesNow(): Set<String> {
+        if (!hasBluetoothPermission()) return emptySet()
+
+        val manager = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
+        val profileIds = listOf(
+            android.bluetooth.BluetoothProfile.HEADSET,
+            android.bluetooth.BluetoothProfile.A2DP,
+            android.bluetooth.BluetoothProfile.GATT,
+            android.bluetooth.BluetoothProfile.GATT_SERVER
+        )
+        return profileIds
+            .flatMap { profile ->
+                runCatching { manager.getConnectedDevices(profile) }
+                    .getOrDefault(emptyList())
+                    .mapNotNull { it.name?.trim()?.lowercase() }
+            }
+            .filter { it.isNotBlank() }
+            .toSet()
+    }
+
+    private fun isDeviceChargingNow(): Boolean {
+        val statusIntent = registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return false
+        val status = statusIntent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        return status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
+    }
+
+    private fun parseGeofence(value: String): Triple<Double, Double, Float>? {
+        val parts = value.split(",").map { it.trim() }
+        if (parts.size != 3) return null
+        val lat = parts[0].toDoubleOrNull() ?: return null
+        val lng = parts[1].toDoubleOrNull() ?: return null
+        val radius = parts[2].toFloatOrNull() ?: return null
+        if (lat !in -90.0..90.0 || lng !in -180.0..180.0 || radius <= 0f) return null
+        return Triple(lat, lng, radius)
+    }
+
+    private fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val earthRadius = 6371000.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = sin(dLat / 2) * sin(dLat / 2) +
+            cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
+            sin(dLon / 2) * sin(dLon / 2)
+        val c = 2 * atan2(sqrt(a), sqrt(1 - a))
+        return earthRadius * c
+    }
+
+    private fun hasLocationPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private suspend fun resolvePersistedRuleFromCurrentForm(): RuleEntity? {
+        val triggerType = selectedTriggerType(binding.triggerTypeSpinner.selectedItemPosition)
+        val triggerCondition = selectedTriggerCondition(binding.triggerConditionSpinner.selectedItemPosition)
+        val triggerValue = binding.triggerValueInput.text?.toString().orEmpty().trim()
+        val actionType = selectedActionType(binding.actionTypeSpinner.selectedItemPosition)
+        val actionValue = selectedActionValue()
+        val enabled = if (editingRule == null) true else binding.enabledSwitch.isChecked
+        val timeMinute = if (triggerType == TriggerType.TIME_RANGE) {
+            parseMinuteOfDay(binding.timeStartInput.text?.toString().orEmpty().trim())
+        } else {
+            null
+        }
+
+        val app = application as ContextAutomatorApp
+        return app.repository.getAllRules()
+            .asSequence()
+            .filter {
+                it.triggerType == triggerType.name &&
+                    it.triggerCondition == triggerCondition.name &&
+                    it.triggerValue == triggerValue &&
+                    it.timeStartMinutes == timeMinute &&
+                    it.timeEndMinutes == timeMinute &&
+                    it.actionType == actionType.name &&
+                    it.actionValue == actionValue &&
+                    it.enabled == enabled
+            }
+            .maxByOrNull { it.updatedAt }
+    }
+
+    private fun attemptCloseEditor() {
+        if (!hasUnsavedChanges()) {
+            finish()
+            return
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.rule_editor_unsaved_changes_title)
+            .setMessage(R.string.rule_editor_unsaved_changes_message)
+            .setPositiveButton(R.string.rule_editor_discard_changes) { _, _ ->
+                finish()
+            }
+            .setNegativeButton(R.string.rule_editor_continue_editing, null)
+            .show()
     }
 
     private fun parseMinuteOfDay(text: String): Int? {
@@ -673,6 +1019,25 @@ class RuleEditorActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun requiresWriteSettings(actionType: ActionType): Boolean {
+        return actionType == ActionType.SCREEN_BRIGHTNESS || actionType == ActionType.SCREEN_TIMEOUT
+    }
+
+    private fun showWriteSettingsPermissionDialog() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.write_settings_permission_dialog_title)
+            .setMessage(R.string.write_settings_permission_dialog_message)
+            .setPositiveButton(R.string.dnd_access_open_settings) { _, _ ->
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                    Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
     private fun pickCurrentLocationInto(targetInput: EditText) {
         if (!hasWifiPermissions()) {
             showWifiPermissionSettingsDialog()
@@ -788,6 +1153,7 @@ class RuleEditorActivity : AppCompatActivity() {
         private const val EXTRA_ENABLED = "enabled"
         private const val EXTRA_CREATED_AT = "created_at"
         private const val EXTRA_UPDATED_AT = "updated_at"
+        private const val NO_TIME_EXTRA = Int.MIN_VALUE
 
         fun createIntent(context: Context, rule: RuleEntity? = null): Intent {
             return Intent(context, RuleEditorActivity::class.java).apply {
@@ -796,8 +1162,8 @@ class RuleEditorActivity : AppCompatActivity() {
                     putExtra(EXTRA_TRIGGER_TYPE, rule.triggerType)
                     putExtra(EXTRA_TRIGGER_CONDITION, rule.triggerCondition)
                     putExtra(EXTRA_TRIGGER_VALUE, rule.triggerValue)
-                    putExtra(EXTRA_TIME_START, rule.timeStartMinutes)
-                    putExtra(EXTRA_TIME_END, rule.timeEndMinutes)
+                    putExtra(EXTRA_TIME_START, rule.timeStartMinutes ?: NO_TIME_EXTRA)
+                    putExtra(EXTRA_TIME_END, rule.timeEndMinutes ?: NO_TIME_EXTRA)
                     putExtra(EXTRA_ACTION_TYPE, rule.actionType)
                     putExtra(EXTRA_ACTION_VALUE, rule.actionValue)
                     putExtra(EXTRA_ENABLED, rule.enabled)
@@ -814,14 +1180,19 @@ class RuleEditorActivity : AppCompatActivity() {
                 triggerType = getStringExtra(EXTRA_TRIGGER_TYPE).orEmpty(),
                 triggerCondition = getStringExtra(EXTRA_TRIGGER_CONDITION).orEmpty(),
                 triggerValue = getStringExtra(EXTRA_TRIGGER_VALUE).orEmpty(),
-                timeStartMinutes = if (hasExtra(EXTRA_TIME_START)) getIntExtra(EXTRA_TIME_START, 0) else null,
-                timeEndMinutes = if (hasExtra(EXTRA_TIME_END)) getIntExtra(EXTRA_TIME_END, 0) else null,
+                timeStartMinutes = getNullableIntExtra(EXTRA_TIME_START),
+                timeEndMinutes = getNullableIntExtra(EXTRA_TIME_END),
                 actionType = getStringExtra(EXTRA_ACTION_TYPE).orEmpty(),
                 actionValue = getIntExtra(EXTRA_ACTION_VALUE, 0),
                 enabled = getBooleanExtra(EXTRA_ENABLED, true),
                 createdAt = getLongExtra(EXTRA_CREATED_AT, System.currentTimeMillis()),
                 updatedAt = getLongExtra(EXTRA_UPDATED_AT, System.currentTimeMillis())
             )
+        }
+
+        private fun Intent.getNullableIntExtra(name: String): Int? {
+            val value = getIntExtra(name, NO_TIME_EXTRA)
+            return if (value == NO_TIME_EXTRA) null else value
         }
     }
 }

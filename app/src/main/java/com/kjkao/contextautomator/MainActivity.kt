@@ -51,7 +51,7 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
             val allGranted = result.values.all { it }
             if (allGranted) {
-                startScanService()
+                ensureSpecialPermissionsAndStart()
             } else {
                 showRuntimePermissionSettingsDialog()
             }
@@ -133,9 +133,26 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (needed.isEmpty()) {
-            startScanService()
+            ensureSpecialPermissionsAndStart()
         } else {
             permissionLauncher.launch(needed.toTypedArray())
+        }
+    }
+
+    private fun ensureSpecialPermissionsAndStart() {
+        lifecycleScope.launch {
+            val needsWriteSettings = viewModel.uiState.value
+                ?.rules
+                .orEmpty()
+                .any {
+                    it.enabled &&
+                        (it.actionType == ActionType.SCREEN_BRIGHTNESS.name || it.actionType == ActionType.SCREEN_TIMEOUT.name)
+                }
+            if (needsWriteSettings && !Settings.System.canWrite(this@MainActivity)) {
+                showWriteSettingsPermissionDialog()
+                return@launch
+            }
+            startScanService()
         }
     }
 
@@ -221,6 +238,21 @@ class MainActivity : AppCompatActivity() {
             .setMessage(R.string.runtime_permission_dialog_message)
             .setPositiveButton(R.string.dnd_access_open_settings) { _, _ ->
                 openAppPermissionSettings()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun showWriteSettingsPermissionDialog() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.write_settings_permission_dialog_title)
+            .setMessage(R.string.write_settings_permission_dialog_message)
+            .setPositiveButton(R.string.dnd_access_open_settings) { _, _ ->
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                    Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
             }
             .setNegativeButton(R.string.cancel, null)
             .show()
