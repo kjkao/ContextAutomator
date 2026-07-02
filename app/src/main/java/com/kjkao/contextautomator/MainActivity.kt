@@ -26,6 +26,7 @@ import com.kjkao.contextautomator.databinding.ActivityMainBinding
 import com.kjkao.contextautomator.data.local.RuleExecutionHistoryEntity
 import com.kjkao.contextautomator.domain.model.ActionType
 import com.kjkao.contextautomator.service.AutomationService
+import com.kjkao.contextautomator.service.ServiceKeepAliveReceiver
 import com.kjkao.contextautomator.ui.main.RuleHistoryAdapter
 import com.kjkao.contextautomator.ui.main.MainViewModel
 import com.kjkao.contextautomator.ui.main.MainViewModelFactory
@@ -172,6 +173,7 @@ class MainActivity : AppCompatActivity() {
         stopService(Intent(this, AutomationService::class.java))
         val app = application as ContextAutomatorApp
         app.automationStateStore.setAutomationEnabled(false)
+        ServiceKeepAliveReceiver.cancelHealthCheck(this)
         lifecycleScope.launch {
             app.timeRuleAlarmScheduler.cancelAllTimeRules(app.repository.getAllRules())
         }

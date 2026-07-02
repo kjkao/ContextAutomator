@@ -59,6 +59,14 @@ class AutomationService : Service() {
     private lateinit var repository: com.kjkao.contextautomator.data.repo.RuleRepository
     private lateinit var ruleCooldownBypassStore: RuleCooldownBypassStore
     private lateinit var wifiReceiver: ScanResultReceiver
+    private val wifiNetworkStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent?) {
+            when (intent?.action) {
+                WifiManager.NETWORK_STATE_CHANGED_ACTION,
+                WifiManager.WIFI_STATE_CHANGED_ACTION -> evaluateRules()
+            }
+        }
+    }
     private var bluetoothAdapter: BluetoothAdapter? = null
     private var dndNotificationShown = false
     private var writeSettingsNotificationShown = false
@@ -99,6 +107,10 @@ class AutomationService : Service() {
             wifiReceiver,
             IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION)
         )
+        registerReceiver(wifiNetworkStateReceiver, IntentFilter().apply {
+            addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION)
+            addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
+        })
         registerReceiver(bluetoothReceiver, IntentFilter().apply {
             addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
             addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
@@ -107,9 +119,14 @@ class AutomationService : Service() {
 
         createChannelIfNeeded()
         startForeground(NOTIFICATION_ID, createNotification())
+        ServiceKeepAliveReceiver.scheduleHealthCheck(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_RESTORE_NOTIFICATION) {
+            startForeground(NOTIFICATION_ID, createNotification())
+            return START_STICKY
+        }
         if (intent?.action == ACTION_RUN_TIME_RULE_ALARM) {
             val ruleId = intent.getLongExtra(EXTRA_RULE_ID, -1L)
             if (ruleId <= 0L) return START_NOT_STICKY
@@ -131,7 +148,7 @@ class AutomationService : Service() {
                     val rules = repository.getEnabledRules()
                     val triggerTypes = rules.map { it.triggerType }.toSet()
 
-                    if (triggerTypes.contains(TriggerType.WIFI_SSID.name)) {
+                    if (needsWifiActiveScan(rules)) {
                         wifiManager.startScan()
                     }
                     maybeStartBluetoothDiscovery(triggerTypes)
@@ -150,6 +167,7 @@ class AutomationService : Service() {
             runCatching { bluetoothAdapter?.cancelDiscovery() }
         }
         unregisterReceiver(wifiReceiver)
+        unregisterReceiver(wifiNetworkStateReceiver)
         unregisterReceiver(bluetoothReceiver)
         super.onDestroy()
     }
@@ -165,8 +183,9 @@ class AutomationService : Service() {
                 if (rules.isEmpty()) return@withLock
 
                 val triggerTypes = rules.map { it.triggerType }.toSet()
+                val needsWifiScanResults = needsWifiActiveScan(rules)
 
-                val scannedSsids = if (triggerTypes.contains(TriggerType.WIFI_SSID.name)) {
+                val scannedSsids = if (needsWifiScanResults) {
                     wifiManager.scanResults
                         .mapNotNull { it.SSID }
                         .map { it.trim().lowercase() }
@@ -217,6 +236,13 @@ class AutomationService : Service() {
                     handleMatchedRule(repository, matchedRule, bypassAllCooldowns)
                 }
             }
+        }
+    }
+
+    private fun needsWifiActiveScan(rules: List<RuleEntity>): Boolean {
+        return rules.any {
+            it.triggerType == TriggerType.WIFI_SSID.name &&
+                it.triggerCondition != TriggerCondition.CONNECTED.name
         }
     }
 
@@ -517,10 +543,21 @@ class AutomationService : Service() {
         contentText: String = getString(R.string.notification_text),
         pendingIntent: PendingIntent? = null
     ): Notification {
+        val deleteIntent = Intent(this, ServiceKeepAliveReceiver::class.java).apply {
+            action = ServiceKeepAliveReceiver.ACTION_NOTIFICATION_DISMISSED
+        }
+        val deletePendingIntent = PendingIntent.getBroadcast(
+            this,
+            NOTIFICATION_DISMISSED_REQUEST_CODE,
+            deleteIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_title))
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_lock_silent_mode_off)
+            .setDeleteIntent(deletePendingIntent)
             .setOngoing(true)
         if (pendingIntent != null) {
             builder.setContentIntent(pendingIntent)
@@ -551,6 +588,7 @@ class AutomationService : Service() {
 
     companion object {
         const val ACTION_RUN_TIME_RULE_ALARM = "com.kjkao.contextautomator.action.RUN_TIME_RULE_ALARM"
+        const val ACTION_RESTORE_NOTIFICATION = "com.kjkao.contextautomator.action.RESTORE_NOTIFICATION"
         const val EXTRA_RULE_ID = "extra_rule_id"
         private const val CHANNEL_ID = "wifi_ringer_service"
         private const val NOTIFICATION_ID = 101
@@ -559,6 +597,7 @@ class AutomationService : Service() {
         private const val IDLE_SCAN_INTERVAL_MS = 300_000L
         private const val BLUETOOTH_DISCOVERY_MIN_INTERVAL_MS = 10 * 60_000L
         private const val RULE_EXECUTION_COOLDOWN_MS = 30 * 60 * 1000L
+        private const val NOTIFICATION_DISMISSED_REQUEST_CODE = 2002
     }
 }
 
