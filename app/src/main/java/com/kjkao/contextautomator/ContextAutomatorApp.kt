@@ -34,13 +34,15 @@ class ContextAutomatorApp : Application() {
             AppDatabase::class.java,
             "context_automator.db"
         )
+            .addMigrations(MIGRATION_4_5)
             .addMigrations(MIGRATION_3_4)
             .fallbackToDestructiveMigration()
             .build()
 
         repository = RuleRepository(
             ruleDao = db.ruleDao(),
-            ruleExecutionHistoryDao = db.ruleExecutionHistoryDao()
+            ruleExecutionHistoryDao = db.ruleExecutionHistoryDao(),
+            ruleCheckHistoryDao = db.ruleCheckHistoryDao()
         )
         timeRuleAlarmScheduler = TimeRuleAlarmScheduler(applicationContext)
         automationStateStore = AutomationStateStore(applicationContext)
@@ -77,6 +79,31 @@ class ContextAutomatorApp : Application() {
                 )
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_rule_execution_history_executedAt` ON `rule_execution_history` (`executedAt`)"
+                )
+            }
+        }
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `rule_check_history` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `ruleId` INTEGER NOT NULL,
+                        `triggerType` TEXT NOT NULL,
+                        `triggerValue` TEXT NOT NULL,
+                        `actionType` TEXT NOT NULL,
+                        `actionValue` INTEGER NOT NULL,
+                        `matched` INTEGER NOT NULL,
+                        `checkedAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_rule_check_history_ruleId` ON `rule_check_history` (`ruleId`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_rule_check_history_checkedAt` ON `rule_check_history` (`checkedAt`)"
                 )
             }
         }

@@ -22,11 +22,14 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.isVisible
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.google.android.material.tabs.TabLayout
 import com.kjkao.contextautomator.databinding.ActivityMainBinding
+import com.kjkao.contextautomator.data.local.RuleCheckHistoryEntity
 import com.kjkao.contextautomator.data.local.RuleExecutionHistoryEntity
 import com.kjkao.contextautomator.domain.model.ActionType
 import com.kjkao.contextautomator.service.AutomationService
 import com.kjkao.contextautomator.service.ServiceKeepAliveReceiver
+import com.kjkao.contextautomator.ui.main.RuleCheckHistoryAdapter
 import com.kjkao.contextautomator.ui.main.RuleHistoryAdapter
 import com.kjkao.contextautomator.ui.main.MainViewModel
 import com.kjkao.contextautomator.ui.main.MainViewModelFactory
@@ -78,7 +81,8 @@ class MainActivity : AppCompatActivity() {
         }
         binding.viewHistoryButton.setOnClickListener {
             lifecycleScope.launch {
-                showRuleHistoryDialog(viewModel.refreshExecutionHistory())
+                val (executionHistory, checkHistory) = viewModel.refreshHistory()
+                showRuleHistoryDialog(executionHistory, checkHistory)
             }
         }
         binding.emptyStateAddRuleButton.setOnClickListener {
@@ -278,17 +282,56 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun showRuleHistoryDialog(history: List<RuleExecutionHistoryEntity>) {
+    private fun showRuleHistoryDialog(
+        executionHistory: List<RuleExecutionHistoryEntity>,
+        checkHistory: List<RuleCheckHistoryEntity>
+    ) {
         val contentView = LayoutInflater.from(this).inflate(R.layout.dialog_rule_history, null)
+        val tabLayout = contentView.findViewById<TabLayout>(R.id.historyTabLayout)
+        val subtitleText = contentView.findViewById<TextView>(R.id.historySubtitleText)
         val recyclerView = contentView.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.historyRecyclerView)
         val emptyText = contentView.findViewById<TextView>(R.id.historyEmptyText)
 
-        val adapter = RuleHistoryAdapter(::formatActionSummary)
         recyclerView.layoutManager = LinearLayoutManager(this)
-        recyclerView.adapter = adapter
-        adapter.submitList(history)
-        emptyText.isVisible = history.isEmpty()
-        recyclerView.isVisible = history.isNotEmpty()
+        val executionAdapter = RuleHistoryAdapter(::formatActionSummary)
+        val checkAdapter = RuleCheckHistoryAdapter(::formatActionSummary)
+        executionAdapter.submitList(executionHistory)
+        checkAdapter.submitList(checkHistory)
+
+        fun renderExecutionTab() {
+            subtitleText.text = getString(R.string.rule_history_execution_subtitle)
+            emptyText.text = getString(R.string.rule_history_empty)
+            recyclerView.adapter = executionAdapter
+            emptyText.isVisible = executionHistory.isEmpty()
+            recyclerView.isVisible = executionHistory.isNotEmpty()
+        }
+
+        fun renderCheckTab() {
+            subtitleText.text = getString(R.string.rule_check_history_subtitle)
+            emptyText.text = getString(R.string.rule_check_history_empty)
+            recyclerView.adapter = checkAdapter
+            emptyText.isVisible = checkHistory.isEmpty()
+            recyclerView.isVisible = checkHistory.isNotEmpty()
+        }
+
+        if (tabLayout.tabCount == 0) {
+            tabLayout.addTab(tabLayout.newTab().setText(R.string.rule_history_tab_execution))
+            tabLayout.addTab(tabLayout.newTab().setText(R.string.rule_history_tab_checks))
+        }
+        renderExecutionTab()
+        tabLayout.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
+            override fun onTabSelected(tab: TabLayout.Tab) {
+                if (tab.position == 0) {
+                    renderExecutionTab()
+                } else {
+                    renderCheckTab()
+                }
+            }
+
+            override fun onTabUnselected(tab: TabLayout.Tab) = Unit
+
+            override fun onTabReselected(tab: TabLayout.Tab) = Unit
+        })
 
         AlertDialog.Builder(this)
             .setTitle(R.string.rule_history_title)

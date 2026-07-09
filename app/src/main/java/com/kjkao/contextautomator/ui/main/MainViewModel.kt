@@ -6,6 +6,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.kjkao.contextautomator.alarm.TimeRuleAlarmScheduler
 import com.kjkao.contextautomator.automation.RuleCooldownBypassStore
+import com.kjkao.contextautomator.data.local.RuleCheckHistoryEntity
+import com.kjkao.contextautomator.data.local.RuleExecutionHistoryEntity
 import com.kjkao.contextautomator.data.local.RuleEntity
 import com.kjkao.contextautomator.data.repo.RuleRepository
 import com.kjkao.contextautomator.domain.model.ActionType
@@ -27,14 +29,26 @@ class MainViewModel(
             val count = repository.getEnabledRulesCount()
             val rules = repository.getAllRules()
             val history = loadExecutionHistory()
-            _uiState.value = _uiState.value?.copy(ruleCount = count, rules = rules, executionHistory = history)
+            val checkHistory = loadCheckHistory()
+            _uiState.value = _uiState.value?.copy(
+                ruleCount = count,
+                rules = rules,
+                executionHistory = history,
+                checkHistory = checkHistory
+            )
         }
     }
 
-    suspend fun refreshExecutionHistory(): List<com.kjkao.contextautomator.data.local.RuleExecutionHistoryEntity> {
-        val history = loadExecutionHistory()
-        _uiState.postValue(_uiState.value?.copy(executionHistory = history))
-        return history
+    suspend fun refreshHistory(): Pair<List<RuleExecutionHistoryEntity>, List<RuleCheckHistoryEntity>> {
+        val executionHistory = loadExecutionHistory()
+        val checkHistory = loadCheckHistory()
+        _uiState.postValue(
+            _uiState.value?.copy(
+                executionHistory = executionHistory,
+                checkHistory = checkHistory
+            )
+        )
+        return executionHistory to checkHistory
     }
 
     fun addRule(
@@ -241,10 +255,14 @@ class MainViewModel(
     }
 
     companion object {
-        private const val HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000L
+        private const val EXECUTION_HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000L
+        private const val CHECK_HISTORY_WINDOW_MS = 3 * 60 * 60 * 1000L
     }
 
     private suspend fun loadExecutionHistory() =
-        repository.getRuleExecutionHistorySince(System.currentTimeMillis() - HISTORY_WINDOW_MS)
+        repository.getRuleExecutionHistorySince(System.currentTimeMillis() - EXECUTION_HISTORY_WINDOW_MS)
+
+    private suspend fun loadCheckHistory() =
+        repository.getRuleCheckHistorySince(System.currentTimeMillis() - CHECK_HISTORY_WINDOW_MS)
 }
 

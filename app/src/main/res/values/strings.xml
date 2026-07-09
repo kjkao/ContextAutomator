@@ -172,10 +172,17 @@
     <string name="write_settings_permission_dialog_title">Permission required</string>
     <string name="write_settings_permission_dialog_message">Brightness and screen-timeout actions need Modify system settings access. Open settings and allow this app.</string>
     <string name="notification_write_settings_needed">Grant Modify system settings access so brightness and timeout rules can run.</string>
-    <string name="rule_history_title">Rule execution history (24h)</string>
+    <string name="rule_history_title">Rule history</string>
     <string name="rule_history_subtitle">Recent executions, newest first.</string>
+    <string name="rule_history_execution_subtitle">Execution history from the last 24 hours, newest first.</string>
+    <string name="rule_history_tab_execution">Executed</string>
+    <string name="rule_history_tab_checks">Checked</string>
     <string name="rule_history_empty">No rule executions in the last 24 hours.</string>
     <string name="rule_history_rule_id">Rule #%1$d</string>
     <string name="rule_history_trigger_line">Trigger: %1$s - %2$s</string>
     <string name="rule_history_action_line">%1$s</string>
+    <string name="rule_check_history_subtitle">Rule scans and condition checks from the last 3 hours, newest first.</string>
+    <string name="rule_check_history_empty">No rule scans or condition checks in the last 3 hours.</string>
+    <string name="rule_check_history_result_matched">Matched</string>
+    <string name="rule_check_history_result_not_matched">Not matched</string>
 </resources>

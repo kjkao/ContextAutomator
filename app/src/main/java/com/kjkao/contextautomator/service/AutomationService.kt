@@ -16,6 +16,10 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
 import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.BatteryManager
 import android.os.Build
@@ -54,6 +58,7 @@ class AutomationService : Service() {
     private var scanJob: Job? = null
 
     private lateinit var wifiManager: WifiManager
+    private lateinit var connectivityManager: ConnectivityManager
     private lateinit var locationManager: LocationManager
     private lateinit var ringerController: RingerController
     private lateinit var repository: com.kjkao.contextautomator.data.repo.RuleRepository
@@ -64,6 +69,21 @@ class AutomationService : Service() {
             when (intent?.action) {
                 WifiManager.NETWORK_STATE_CHANGED_ACTION,
                 WifiManager.WIFI_STATE_CHANGED_ACTION -> evaluateRules()
+            }
+        }
+    }
+    private val wifiNetworkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            evaluateRules()
+        }
+
+        override fun onLost(network: Network) {
+            evaluateRules()
+        }
+
+        override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+            if (networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                evaluateRules()
             }
         }
     }
@@ -94,6 +114,7 @@ class AutomationService : Service() {
     override fun onCreate() {
         super.onCreate()
         wifiManager = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+        connectivityManager = applicationContext.getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
         locationManager = applicationContext.getSystemService(LOCATION_SERVICE) as LocationManager
         bluetoothAdapter = (getSystemService(BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager)?.adapter
         ringerController = RingerController(this)
@@ -111,6 +132,12 @@ class AutomationService : Service() {
             addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION)
             addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
         })
+        runCatching {
+            val request = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .build()
+            connectivityManager.registerNetworkCallback(request, wifiNetworkCallback)
+        }
         registerReceiver(bluetoothReceiver, IntentFilter().apply {
             addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
             addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
@@ -125,6 +152,7 @@ class AutomationService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_RESTORE_NOTIFICATION) {
             startForeground(NOTIFICATION_ID, createNotification())
+            ensureScanLoopStarted()
             return START_STICKY
         }
         if (intent?.action == ACTION_RUN_TIME_RULE_ALARM) {
@@ -142,23 +170,27 @@ class AutomationService : Service() {
             return START_NOT_STICKY
         }
 
-        if (scanJob == null) {
-            scanJob = serviceScope.launch {
-                while (isActive) {
-                    val rules = repository.getEnabledRules()
-                    val triggerTypes = rules.map { it.triggerType }.toSet()
+        ensureScanLoopStarted()
+        return START_STICKY
+    }
 
-                    if (needsWifiActiveScan(rules)) {
-                        wifiManager.startScan()
-                    }
-                    maybeStartBluetoothDiscovery(triggerTypes)
+    private fun ensureScanLoopStarted() {
+        if (scanJob != null) return
 
-                    evaluateRules(rules)
-                    delay(resolveScanInterval(triggerTypes, rules.isEmpty()))
+        scanJob = serviceScope.launch {
+            while (isActive) {
+                val rules = repository.getEnabledRules()
+                val triggerTypes = rules.map { it.triggerType }.toSet()
+
+                if (needsWifiActiveScan(rules)) {
+                    wifiManager.startScan()
                 }
+                maybeStartBluetoothDiscovery(triggerTypes)
+
+                evaluateRules(rules)
+                delay(resolveScanInterval(triggerTypes, rules.isEmpty()))
             }
         }
-        return START_STICKY
     }
 
     override fun onDestroy() {
@@ -168,6 +200,7 @@ class AutomationService : Service() {
         }
         unregisterReceiver(wifiReceiver)
         unregisterReceiver(wifiNetworkStateReceiver)
+        runCatching { connectivityManager.unregisterNetworkCallback(wifiNetworkCallback) }
         unregisterReceiver(bluetoothReceiver)
         super.onDestroy()
     }
@@ -220,15 +253,29 @@ class AutomationService : Service() {
                     ""
                 }
 
-                val matchedRules = rules.filter { rule ->
-                    matchesCondition(
-                        rule = rule,
-                        scannedSsids = scannedSsids,
-                        connectedWifiSsid = connectedWifiSsid,
-                        isCharging = isCharging,
-                        currentLocation = currentLocation,
-                        foregroundPackage = foregroundPackage
-                    )
+                val retentionCutoff = System.currentTimeMillis() - RULE_CHECK_HISTORY_RETENTION_MS
+                val matchedRules = buildList {
+                    rules.forEach { rule ->
+                        if (rule.triggerType == TriggerType.TIME_RANGE.name) return@forEach
+
+                        val matched = matchesCondition(
+                            rule = rule,
+                            scannedSsids = scannedSsids,
+                            connectedWifiSsid = connectedWifiSsid,
+                            isCharging = isCharging,
+                            currentLocation = currentLocation,
+                            foregroundPackage = foregroundPackage
+                        )
+                        repository.recordRuleCheck(
+                            rule = rule,
+                            matched = matched,
+                            cooldownMs = RULE_CHECK_HISTORY_COOLDOWN_MS,
+                            retentionCutoff = retentionCutoff
+                        )
+                        if (matched) {
+                            add(rule)
+                        }
+                    }
                 }
                 if (matchedRules.isEmpty()) return@withLock
 
@@ -307,6 +354,13 @@ class AutomationService : Service() {
         if (latestExecution != null && latestExecution.executedAt >= todayStartMillis) return
 
         val now = System.currentTimeMillis()
+        repository.recordRuleCheck(
+            rule = rule,
+            matched = true,
+            checkedAt = now,
+            cooldownMs = RULE_CHECK_HISTORY_COOLDOWN_MS,
+            retentionCutoff = now - RULE_CHECK_HISTORY_RETENTION_MS
+        )
         val alreadyApplied = ringerController.isActionAlreadyApplied(rule.actionType, rule.actionValue)
         val applied = if (alreadyApplied) false else applyAction(rule)
         if (alreadyApplied || applied) {
@@ -328,7 +382,7 @@ class AutomationService : Service() {
                 if (rule.triggerCondition == TriggerCondition.CONNECTED.name) {
                     connectedWifiSsid == target
                 } else {
-                    scannedSsids.contains(target)
+                    scannedSsids.contains(target) || connectedWifiSsid == target
                 }
             }
             TriggerType.TIME_RANGE.name -> {
@@ -597,6 +651,8 @@ class AutomationService : Service() {
         private const val IDLE_SCAN_INTERVAL_MS = 300_000L
         private const val BLUETOOTH_DISCOVERY_MIN_INTERVAL_MS = 10 * 60_000L
         private const val RULE_EXECUTION_COOLDOWN_MS = 30 * 60 * 1000L
+        private const val RULE_CHECK_HISTORY_COOLDOWN_MS = 5 * 60 * 1000L
+        private const val RULE_CHECK_HISTORY_RETENTION_MS = 3 * 60 * 60 * 1000L
         private const val NOTIFICATION_DISMISSED_REQUEST_CODE = 2002
     }
 }

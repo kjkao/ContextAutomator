@@ -7,10 +7,19 @@
     android:paddingTop="8dp"
     android:paddingBottom="4dp">
 
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/historyTabLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        app:tabIndicatorFullWidth="false" />
+
     <TextView
         android:id="@+id/historySubtitleText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
         android:paddingStart="20dp"
         android:paddingEnd="20dp"
         android:text="@string/rule_history_subtitle"
